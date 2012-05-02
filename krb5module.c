@@ -676,7 +676,6 @@ make_principal(PyObject *ctx_obj, krb5_context ctx, krb5_principal orig_princ)
 
   if(!orig_princ)
     {
-      Py_INCREF(Py_None);
       return NULL;
     }
   
