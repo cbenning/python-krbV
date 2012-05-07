@@ -30,8 +30,10 @@
 static PyObject *pk_default_context(PyObject *self, PyObject *unused_args);
 static void destroy_ac(void *cobj, void *desc);
 static void destroy_principal(void *cobj, void *desc);
+static void destroy_creds(void *cobj, void *desc);
+static PyObject *make_credentials(PyObject *context, krb5_context ctx, krb5_creds *creds);
 
-static PyObject *krb5_module, *context_class, *auth_context_class, *principal_class, *ccache_class, *rcache_class, *keytab_class;
+static PyObject *krb5_module, *context_class, *auth_context_class, *principal_class, *ccache_class, *creds_class, *rcache_class, *keytab_class;
 
 /* Helper methods for getting at wrapped data */
 static krb5_context
@@ -74,6 +76,19 @@ Principal_get_krb5_context(PyObject *self)
     }
   else
     return NULL;
+}
+
+static krb5_creds*
+Credentials_get_krb5_creds(PyObject *self)
+{
+  PyObject *tmp;
+  krb5_creds *creds;
+  tmp = PyObject_GetAttrString(self, "_creds");
+  if (!tmp)
+    return NULL;
+  creds = PyCObject_AsVoidPtr(tmp);
+  Py_DECREF(tmp);
+  return creds;
 }
 
 static krb5_principal
@@ -2739,6 +2754,7 @@ PyDoc_STRVAR(CCache__init__doc__,
   initialize()                                                               \n\
   __eq__()                                                                   \n\
   get_credentials()                                                          \n\
+  get_creds()                                                                \n\
   init_creds_keytab()                                                        \n\
   principal()                                                                \n\
 ");
@@ -3222,13 +3238,539 @@ CCache_get_credentials(PyObject *unself __UNUSED, PyObject *args, PyObject *kw)
   return retval;
 } /* KrbV.CCache.get_credentials() */
 
+PyDoc_STRVAR(CCache_get_creds__doc__,
+"get_creds(Credentials, integer) -> Credentials                              \n\
+                                                                             \n\
+:Summary : Get an application-service ticket.                                \n\
+                                                                             \n\
+:Parameters :                                                                \n\
+    in_creds : Credentials object                                            \n\
+    options  : integer                                                       \n\
+       0x00000001 KRB5_GC_USER_USER    Get a peer-to-peer ticket             \n\
+       0x00000002 KRB5_GC_CACHED       Don't request a new ticket            \n\
+                                                                             \n\
+:Return Value :                                                              \n\
+    Credentials object                                                       \n\
+                                                                             \n\
+:Purpose :                                                                   \n\
+    get_creds() gets tickets on the user's behalf.                           \n\
+                                                                             \n\
+:Action & side-effects :                                                     \n\
+  * If the CCache contains up-to-date tickets for this service,              \n\
+    get_creds() retrieves those tickets from in_creds or the CCache.         \n\
+  * If the CCache doesn't have up-to-date tickets, get_creds()               \n\
+    uses the user's TGT, in the in_creds parameter, to request tickets.      \n\
+  * Either way, get_creds() returns an up-to-date application-ticket.        \n\
+  * get_creds() also may use the CCache self-object to find the TGT          \n\
+    and to store the new tickets.                                            \n\
+                                                                             \n\
+:See also :                                                                  \n\
+    init_creds_keytab() - for application-servers that need to request & use \n\
+    client-side tickets.                                                     \n\
+");
+static PyObject*
+CCache_get_creds(PyObject *unself __UNUSED, PyObject *args, PyObject *kw)
+{
+  krb5_context ctx = NULL;
+  krb5_ccache ccache = NULL;
+  PyObject *retval, *self, *credsobj, *context;
+  krb5_flags options = 0;
+  krb5_error_code rc;
+  krb5_creds *in_creds, *out_creds;
+
+  static const char *kwlist[]={"self", "in_creds", "options", NULL };
+
+  if (!PyArg_ParseTupleAndKeywords(args, kw, "OO|i:get_credentials", (char **)kwlist,
+				   &self, &credsobj, &options))
+    return NULL;
+
+  in_creds = Credentials_get_krb5_creds(credsobj);
+  if (!in_creds)
+    {
+      PyErr_Format(PyExc_TypeError, "a Credentials object is required");
+      return NULL;
+    }
+
+  context = PyObject_GetAttrString(self, "context");
+  ctx = Context_get_krb5_context(context);
+  ccache = CCache_get_krb5_ccache(self);
+
+  rc = krb5_get_credentials(ctx, options, ccache, in_creds, &out_creds);
+  if (rc)
+    return pk_error(rc);
+
+  retval = make_credentials(context, ctx, out_creds);
+
+  Py_DECREF(context);
+  return retval;
+} /* KrbV.CCache.get_creds() */
+
+static krb5_cc_cursor
+CCache_get_krb5_cc_cursor(PyObject *self)
+{
+  PyObject *tmp;
+  tmp = PyObject_GetAttrString(self, "_cursor");
+  if (tmp)
+    {
+      krb5_cc_cursor cursor = PyCObject_AsVoidPtr(tmp);
+      Py_DECREF(tmp);
+      return cursor;
+    }
+  return NULL;
+}
+
+PyDoc_STRVAR(CCache__iter__doc__,
+"__iter__() -> iterator                                                      \n\
+                                                                             \n\
+:Summary : Return an iterator over the Credentials stored in the CCache.     \n\
+                                                                             \n\
+:Parameters : none                                                           \n\
+                                                                             \n\
+:Return Value :                                                              \n\
+    Iterator over the Credentials stored in the CCache.                      \n\
+                                                                             \n\
+:Purpose :                                                                   \n\
+    Support iteration over the contents of the CCache.                       \n\
+                                                                             \n\
+:Action & side-effects :                                                     \n\
+    Returns the CCache object itself, which implements the iterator          \n\
+    protocol.  After iteration is completes, the iterator should be          \n\
+    discarded.  Reusing the same iterator after another call to              \n\
+    CCache.__iter__() on the source CCache causes undefined behavior.        \n\
+                                                                             \n\
+:See also :                                                                  \n\
+    next() - get the next Credentials object in the CCache.                  \n\
+");
+static PyObject*
+CCache__iter__(PyObject *unself __UNUSED, PyObject *args)
+{
+  PyObject *self, *context, *curobj;
+  krb5_context ctx;
+  krb5_ccache ccache;
+  krb5_cc_cursor cursor;
+  krb5_error_code rc;
+  if (!PyArg_ParseTuple(args, "O:__iter__", &self))
+    return NULL;
+  context = PyObject_GetAttrString(self, "context");
+  ctx = Context_get_krb5_context(context);
+  ccache = CCache_get_krb5_ccache(self);
+  cursor = CCache_get_krb5_cc_cursor(self);
+  if (cursor) {
+    // Re-starting iteration after it was interrupted partway through.
+    // Cleanup from the previous iteration before starting over.
+    rc = krb5_cc_end_seq_get(ctx, ccache, &cursor);
+    if (rc)
+      return pk_error(rc);
+  }
+  rc = krb5_cc_start_seq_get(ctx, ccache, &cursor);
+  if (rc)
+    return pk_error(rc);
+  curobj = PyCObject_FromVoidPtr(cursor, NULL);
+  PyObject_SetAttrString(self, "_cursor", curobj);
+  Py_DECREF(curobj);
+
+  Py_DECREF(context);
+  Py_INCREF(self);
+  return self;
+}
+
+PyDoc_STRVAR(CCache_next__doc__,
+"next() -> Credentials object                                                \n\
+                                                                             \n\
+:Summary : Return the next Credentials object in the CCache.                 \n\
+           Internal function, used to implement the iterator protocol.       \n\
+           Do not call directly.                                             \n\
+                                                                             \n\
+:Parameters : none                                                           \n\
+                                                                             \n\
+:Return Value :                                                              \n\
+    The next Credentials object stored in the CCache.                        \n\
+                                                                             \n\
+:Purpose :                                                                   \n\
+    Implement the iterator protocol.                                         \n\
+                                                                             \n\
+:Action & side-effects :                                                     \n\
+    Returns the next Credentials object while iterating over the contents    \n\
+    of the CCache.                                                           \n\
+                                                                             \n\
+:See also :                                                                  \n\
+    __iter__() - get an iterator over the contents of the CCache.            \n\
+");
+static PyObject*
+CCache_next(PyObject *unself __UNUSED, PyObject *args)
+{
+  PyObject *self, *context, *retval;
+  krb5_context ctx;
+  krb5_ccache ccache;
+  krb5_cc_cursor cursor;
+  krb5_creds creds;
+  krb5_error_code rc;
+  char *name;
+
+  if (!PyArg_ParseTuple(args, "O:next", &self))
+    return NULL;
+  context = PyObject_GetAttrString(self, "context");
+  ctx = Context_get_krb5_context(context);
+  ccache = CCache_get_krb5_ccache(self);
+  cursor = CCache_get_krb5_cc_cursor(self);
+  if (!cursor)
+    {
+      PyErr_Format(PyExc_RuntimeError, "cannot call next() outside of iteration");
+      return NULL;
+    }
+  rc = krb5_cc_next_cred(ctx, ccache, &cursor, &creds);
+  if (rc)
+    {
+      if (rc == KRB5_CC_END)
+	{
+	  PyErr_Format(PyExc_StopIteration, "no more Credentials");
+	  return NULL;
+	}
+      else
+	return pk_error(rc);
+    }
+
+  rc = krb5_unparse_name(ctx, creds.server, &name);
+  if (rc)
+    return pk_error(rc);
+  retval = PyString_FromString(name);
+  free(name);
+
+  Py_DECREF(context);
+  return retval;
+}
+
+PyDoc_STRVAR(CCache__getitem__doc__,
+"__getitem__(key) -> Credentials object                                      \n\
+                                                                             \n\
+:Summary : Return the Credentials object in the CCache with the with a       \n\
+           server principal whose name matches the key.                      \n\
+           Do not call directly.                                             \n\
+                                                                             \n\
+:Parameters :                                                                \n\
+    key : string                                                             \n\
+                                                                             \n\
+:Return Value :                                                              \n\
+    A Credentials object                                                     \n\
+                                                                             \n\
+:Purpose :                                                                   \n\
+    Implement the mapping  protocol.                                         \n\
+                                                                             \n\
+:Action & side-effects :                                                     \n\
+    Returns a Credentials object with a server principal with a              \n\
+    matching name.                                                           \n\
+                                                                             \n\
+:See also :                                                                  \n\
+    iteritems() - get an iterator over the contents of the CCache.           \n\
+");
+static PyObject*
+CCache__getitem__(PyObject *unself __UNUSED, PyObject *args)
+{
+  PyObject *self, *context, *retval;
+  char *key;
+  krb5_context ctx;
+  krb5_ccache ccache;
+  krb5_principal cprinc, sprinc;
+  krb5_creds in_creds, out_creds;
+  krb5_error_code rc;
+  if (!PyArg_ParseTuple(args, "Os:__getitem__", &self, &key))
+    return NULL;
+  context = PyObject_GetAttrString(self, "context");
+  ctx = Context_get_krb5_context(context);
+  ccache = CCache_get_krb5_ccache(self);
+  rc = krb5_cc_get_principal(ctx, ccache, &cprinc);
+  if (rc)
+    return pk_error(rc);
+  rc = krb5_parse_name(ctx, key, &sprinc);
+  if (rc)
+    return pk_error(rc);
+  memset(&in_creds, 0, sizeof(in_creds));
+  in_creds.client = cprinc;
+  in_creds.server = sprinc;
+  rc = krb5_cc_retrieve_cred(ctx, ccache, 0, &in_creds, &out_creds);
+  if (rc)
+    {
+      if (rc == KRB5_CC_NOTFOUND)
+	{
+	  PyErr_Format(PyExc_KeyError, "%.400s", key);
+	  return NULL;
+	}
+      else
+	return pk_error(rc);
+    }
+
+  retval = make_credentials(context, ctx, &out_creds);
+
+  krb5_free_principal(ctx, sprinc);
+  krb5_free_principal(ctx, cprinc);
+
+  Py_DECREF(context);
+  return retval;
+}
+
+PyDoc_STRVAR(CCache_has_key__doc__,
+"has_key(key) -> bool                                                        \n\
+                                                                             \n\
+:Summary : Check if the CCache contains a Credentials object                 \n\
+           whose server principal has a name that matches the key.           \n\
+                                                                             \n\
+:Parameters :                                                                \n\
+    key : string                                                             \n\
+                                                                             \n\
+:Return Value :                                                              \n\
+    A boolean value indicating if a Credentials object with a matching       \n\
+    server principal exists in the CCache.                                   \n\
+                                                                             \n\
+:Purpose :                                                                   \n\
+    Implement the mapping  protocol.                                         \n\
+                                                                             \n\
+:See also :                                                                  \n\
+    keys() - return a list of names from server principals in the CCache     \n\
+");
+static PyObject*
+CCache_has_key(PyObject *unself, PyObject *args)
+{
+  PyObject *creds = CCache__getitem__(unself, args);
+  PyObject *retval;
+  PyErr_Clear();
+  if (creds)
+    {
+      retval = Py_True;
+      Py_DECREF(creds);
+    }
+  else
+    retval = Py_False;
+  Py_INCREF(retval);
+  return retval;
+}
+
+PyDoc_STRVAR(CCache_get__doc__,
+"get(key) -> Credentials object                                              \n\
+                                                                             \n\
+:Summary : Return a Credentials object whose server principal has a name     \n\
+           that matches the key, or None if there are no matching principals.\n\
+                                                                             \n\
+:Parameters :                                                                \n\
+    key : string                                                             \n\
+                                                                             \n\
+:Return Value :                                                              \n\
+    A Credentials object with a matching server principal, or None.          \n\
+                                                                             \n\
+:Purpose :                                                                   \n\
+    Implement the mapping  protocol.                                         \n\
+                                                                             \n\
+:See also :                                                                  \n\
+    keys() - return a list of names from server principals in the CCache     \n\
+");
+static PyObject*
+CCache_get(PyObject *unself, PyObject *args)
+{
+  PyObject *creds = CCache__getitem__(unself, args);
+  PyErr_Clear();
+  if (creds)
+    return creds;
+  else
+    Py_RETURN_NONE;
+}
+
+PyDoc_STRVAR(CCache_keys__doc__,
+"keys() -> list of names of server principals associated with each           \n\
+           Credentials object in the CCache                                  \n\
+                                                                             \n\
+:Summary : Return a list of names of server principals associated with       \n\
+           Credentials objects in the CCache                                 \n\
+                                                                             \n\
+:Parameters : none                                                           \n\
+                                                                             \n\
+:Return Value :                                                              \n\
+    a list of strings                                                        \n\
+                                                                             \n\
+:Purpose :                                                                   \n\
+    Implement the mapping  protocol.                                         \n\
+                                                                             \n\
+:See also :                                                                  \n\
+    values() - return a list of Credentials objects in the CCache            \n\
+");
+static PyObject*
+CCache_keys(PyObject *unself __UNUSED, PyObject *args)
+{
+  PyObject *self, *context, *nameobj, *retval;
+  krb5_context ctx;
+  krb5_ccache ccache;
+  krb5_cc_cursor cursor;
+  krb5_creds creds;
+  krb5_error_code rc;
+  char *name;
+
+  if (!PyArg_ParseTuple(args, "O:keys", &self))
+    return NULL;
+  context = PyObject_GetAttrString(self, "context");
+  ctx = Context_get_krb5_context(context);
+  ccache = CCache_get_krb5_ccache(self);
+
+  rc = krb5_cc_start_seq_get(ctx, ccache, &cursor);
+  if (rc)
+    return pk_error(rc);
+
+  retval = PyList_New(0);
+  while (!(rc = krb5_cc_next_cred(ctx, ccache, &cursor, &creds)))
+    {
+      rc = krb5_unparse_name(ctx, creds.server, &name);
+      if (rc)
+	return pk_error(rc);
+      nameobj = PyString_FromString(name);
+      free(name);
+      if (PyList_Append(retval, nameobj))
+	return NULL;
+      Py_DECREF(nameobj);
+    }
+  if (rc != KRB5_CC_END)
+    return pk_error(rc);
+
+  rc = krb5_cc_end_seq_get(ctx, ccache, &cursor);
+  if (rc)
+    return pk_error(rc);
+
+  Py_DECREF(context);
+  return retval;
+}
+
+PyDoc_STRVAR(CCache_values__doc__,
+"values() -> list of Credentials objects                                     \n\
+                                                                             \n\
+:Summary : Return a list of Credentials objects from the CCache              \n\
+                                                                             \n\
+:Parameters : none                                                           \n\
+                                                                             \n\
+:Return Value :                                                              \n\
+    a list of Credentials                                                    \n\
+                                                                             \n\
+:Purpose :                                                                   \n\
+    Implement the mapping  protocol.                                         \n\
+                                                                             \n\
+:See also :                                                                  \n\
+    keys() - return a list of names of server principals in the CCache       \n\
+");
+static PyObject*
+CCache_values(PyObject *unself __UNUSED, PyObject *args)
+{
+  PyObject *self, *context, *credsobj, *retval;
+  krb5_context ctx;
+  krb5_ccache ccache;
+  krb5_cc_cursor cursor;
+  krb5_creds creds;
+  krb5_error_code rc;
+
+  if (!PyArg_ParseTuple(args, "O:values", &self))
+    return NULL;
+  context = PyObject_GetAttrString(self, "context");
+  ctx = Context_get_krb5_context(context);
+  ccache = CCache_get_krb5_ccache(self);
+
+  rc = krb5_cc_start_seq_get(ctx, ccache, &cursor);
+  if (rc)
+    return pk_error(rc);
+
+  retval = PyList_New(0);
+  while (!(rc = krb5_cc_next_cred(ctx, ccache, &cursor, &creds)))
+    {
+      credsobj = make_credentials(context, ctx, &creds);
+      if (PyList_Append(retval, credsobj))
+	return NULL;
+      Py_DECREF(credsobj);
+    }
+  if (rc != KRB5_CC_END)
+    return pk_error(rc);
+
+  rc = krb5_cc_end_seq_get(ctx, ccache, &cursor);
+  if (rc)
+    return pk_error(rc);
+
+  Py_DECREF(context);
+  return retval;
+}
+
+PyDoc_STRVAR(CCache_items__doc__,
+"items() -> list of (principal name, Credentials) tuples                     \n\
+                                                                             \n\
+:Summary : Return a list of (name, Credentials) objects from the CCache.     \n\
+                                                                             \n\
+:Parameters : none                                                           \n\
+                                                                             \n\
+:Return Value :                                                              \n\
+    a list of (name, Credentials) tuples                                     \n\
+                                                                             \n\
+:Purpose :                                                                   \n\
+    Implement the mapping  protocol.                                         \n\
+                                                                             \n\
+:See also :                                                                  \n\
+    keys() - return a list of names of server principals in the CCache       \n\
+    values() - return a list of Credentials objects from the CCache          \n\
+");
+static PyObject*
+CCache_items(PyObject *unself __UNUSED, PyObject *args)
+{
+  PyObject *self, *context, *retval, *tuple, *nameobj, *credsobj;
+  krb5_context ctx;
+  krb5_ccache ccache;
+  krb5_cc_cursor cursor;
+  krb5_creds creds;
+  krb5_error_code rc;
+  char *name;
+
+  if (!PyArg_ParseTuple(args, "O:items", &self))
+    return NULL;
+  context = PyObject_GetAttrString(self, "context");
+  ctx = Context_get_krb5_context(context);
+  ccache = CCache_get_krb5_ccache(self);
+
+  rc = krb5_cc_start_seq_get(ctx, ccache, &cursor);
+  if (rc)
+    return pk_error(rc);
+
+  retval = PyList_New(0);
+  while (!(rc = krb5_cc_next_cred(ctx, ccache, &cursor, &creds)))
+    {
+      rc = krb5_unparse_name(ctx, creds.server, &name);
+      if (rc)
+	return pk_error(rc);
+      nameobj = PyString_FromString(name);
+      free(name);
+      credsobj = make_credentials(context, ctx, &creds);
+      tuple = PyTuple_Pack(2, nameobj, credsobj);
+      Py_DECREF(credsobj);
+      Py_DECREF(nameobj);
+      if (PyList_Append(retval, tuple))
+	return NULL;
+      Py_DECREF(tuple);
+    }
+  if (rc != KRB5_CC_END)
+    return pk_error(rc);
+
+  rc = krb5_cc_end_seq_get(ctx, ccache, &cursor);
+  if (rc)
+    return pk_error(rc);
+
+  Py_DECREF(context);
+  return retval;
+}
+
 static PyMethodDef ccache_methods[] = {
   {"__init__",         (PyCFunction)CCache__init__,          METH_VARARGS|METH_KEYWORDS, CCache__init__doc__},
   {"__eq__",           (PyCFunction)CCache_eq,               METH_VARARGS,               CCache_eq__doc__},
   {"principal",        (PyCFunction)CCache_principal,        METH_VARARGS|METH_KEYWORDS, CCache_principal__doc__},
   {"get_credentials",  (PyCFunction)CCache_get_credentials,  METH_VARARGS|METH_KEYWORDS, CCache_get_credentials__doc__},
+  {"get_creds",        (PyCFunction)CCache_get_creds,        METH_VARARGS|METH_KEYWORDS, CCache_get_creds__doc__},
   {"init_creds_keytab",(PyCFunction)CCache_init_creds_keytab,METH_VARARGS|METH_KEYWORDS, CCache_init_creds_keytab__doc__},
   {"init",             (PyCFunction)CCache_initialize,       METH_VARARGS|METH_KEYWORDS, CCache_initialize__doc__},
+  {"__iter__",         (PyCFunction)CCache__iter__,          METH_VARARGS,               CCache__iter__doc__},
+  {"next",             (PyCFunction)CCache_next,             METH_VARARGS,               CCache_next__doc__},
+  {"__getitem__",      (PyCFunction)CCache__getitem__,       METH_VARARGS,               CCache__getitem__doc__},
+  {"keys",             (PyCFunction)CCache_keys,             METH_VARARGS,               CCache_keys__doc__},
+  {"values",           (PyCFunction)CCache_values,           METH_VARARGS,               CCache_values__doc__},
+  {"items",            (PyCFunction)CCache_items,            METH_VARARGS,               CCache_items__doc__},
+  {"has_key",          (PyCFunction)CCache_has_key,          METH_VARARGS,               CCache_has_key__doc__},
+  {"get",              (PyCFunction)CCache_get,              METH_VARARGS,               CCache_get__doc__},
   {NULL, NULL, 0, NULL}
 };
 
@@ -3240,6 +3782,288 @@ pk_ccache_make_class(PyObject *module)
     setattr = {"__setattr__", CCache_setattr, METH_VARARGS, CCache_setattr__doc__};
 
   return make_class(module, "CCache", ccache_methods, &getattr, &setattr);
+}
+
+/************************* credentials **********************************/
+static void
+destroy_creds(void *cobj, void *desc)
+{
+  krb5_free_creds(desc, cobj);
+}
+
+static PyObject *
+make_credentials(PyObject *context, krb5_context ctx, krb5_creds *creds)
+{
+  PyObject *credobj, *retval, *objargs, *objkw;
+  krb5_creds *new_creds;
+  krb5_error_code rc;
+  rc = krb5_copy_creds(ctx, creds, &new_creds);
+  if (rc)
+    return pk_error(rc);
+  credobj = PyCObject_FromVoidPtrAndDesc(new_creds, ctx, destroy_creds);
+  objargs = PyTuple_New(0);
+  objkw = PyDict_New();
+  PyDict_SetItemString(objkw, "creds", credobj);
+  PyDict_SetItemString(objkw, "context", context);
+  retval = PyEval_CallObjectWithKeywords(creds_class, objargs, objkw);
+  Py_DECREF(objkw);
+  Py_DECREF(objargs);
+  Py_DECREF(credobj);
+
+  return retval;
+}
+
+PyDoc_STRVAR(Credentials__init__doc__,
+" __init__() -> Credentials                                                  \n\
+                                                                             \n\
+:Summary : Create a new Credentials object.                                  \n\
+                                                                             \n\
+:Parameters :                                                                \n\
+    context            : Context       context                               \n\
+    client             : Principal     client principal                      \n\
+    server             : Principal     server principal                      \n\
+                                                                             \n\
+:Return Value :                                                              \n\
+    Credentials object                                                       \n\
+                                                                             \n\
+:Other Methods :                                                             \n\
+");
+static PyObject*
+Credentials__init__(PyObject *unself __UNUSED, PyObject *args, PyObject *kw)
+{
+  PyObject *self;
+  PyObject *context, *credobj=NULL, *client=NULL, *server=NULL;
+  krb5_context ctx;
+  krb5_creds tmpcreds, *creds;
+  krb5_principal cprinc, sprinc;
+  krb5_error_code rc;
+  static const char *kwlist[] = {"self", "context", "client", "server", "creds", NULL};
+
+  if (!PyArg_ParseTupleAndKeywords(args, kw, "OO|OOO!:__init__", (char **)kwlist,
+				   &self, &context, &client, &server,
+				   &PyCObject_Type, &credobj))
+    return NULL;
+
+  if (!context)
+    {
+      PyErr_Format(PyExc_ValueError, "context must be provided");
+      return NULL;
+    }
+  ctx = Context_get_krb5_context(context);
+  if (!ctx)
+    {
+      PyErr_Format(PyExc_TypeError, "a Context object is required");
+      return NULL;
+    }
+  if (!credobj)
+    {
+      if (!client)
+	{
+	  PyErr_Format(PyExc_ValueError, "client must be provided");
+	  return NULL;
+	}
+      cprinc = Principal_get_krb5_principal(client);
+      if (!cprinc)
+	{
+	  PyErr_Format(PyExc_TypeError, "a Principal object is required");
+	  return NULL;
+	}
+      if (!server)
+	{
+	  PyErr_Format(PyExc_ValueError, "server must be provided");
+	  return NULL;
+	}
+      sprinc = Principal_get_krb5_principal(server);
+      if (!sprinc)
+	{
+	  PyErr_Format(PyExc_TypeError, "a Principal object is required");
+	  return NULL;
+	}
+      memset(&tmpcreds, 0, sizeof(tmpcreds));
+      tmpcreds.client = cprinc;
+      tmpcreds.server = sprinc;
+      rc = krb5_copy_creds(ctx, &tmpcreds, &creds);
+      if (rc)
+	return pk_error(rc);
+      credobj = PyCObject_FromVoidPtrAndDesc(creds, ctx, destroy_creds);
+    }
+  PyObject_SetAttrString(self, "_creds", credobj);
+  PyObject_SetAttrString(self, "context", context);
+
+  Py_INCREF(Py_None);
+  return Py_None;
+} /* KrbV.Credentials.__init__() */
+
+PyDoc_STRVAR(Credentials__getattr__doc__,
+"__getattr__(string) -> string                                                  \n\
+                                                                                \n\
+:Summary : Get the value of a member-field in the Credentials object.           \n\
+           Internal function, do not use.                                       \n\
+                                                                                \n\
+:Parameters :                                                                   \n\
+    This method supports only the following members:                            \n\
+    * client    : Principal                                                     \n\
+    * server    : Principal                                                     \n\
+    * authtime  : int                                                           \n\
+                                                                                \n\
+:Return Value :                                                                 \n\
+    __getattr__() returns different object types based on the attribute name.   \n\
+");
+static PyObject*
+Credentials__getattr(PyObject *unself __UNUSED, PyObject *args)
+{
+  char *name;
+  PyObject *retval = NULL, *ctxobj = NULL, *self;
+  krb5_context ctx = NULL;
+  krb5_creds *creds = NULL;
+
+  if(!PyArg_ParseTuple(args, "Os:__getattr__", &self, &name))
+    return NULL;
+
+  if (strcmp(name, "context") && strcmp(name, "_creds"))
+    {
+      ctxobj = PyObject_GetAttrString(self, "context");
+      if (!ctxobj)
+	return NULL;
+      ctx = Context_get_krb5_context(ctxobj);
+      if (!ctx)
+	return NULL;
+      creds = Credentials_get_krb5_creds(self);
+      if (!creds)
+	return NULL;
+    }
+
+  PyErr_Clear();
+
+  if (!strcmp(name, "client"))
+    {
+      retval = make_principal(ctxobj, ctx, creds->client);
+    }
+  else if (!strcmp(name, "server"))
+    {
+      retval = make_principal(ctxobj, ctx, creds->server);
+    }
+  else if (!strcmp(name, "authtime"))
+    {
+      retval = PyInt_FromLong(creds->times.authtime);
+    }
+  else if (!strcmp(name, "starttime"))
+    {
+      retval = PyInt_FromLong(creds->times.starttime);
+    }
+  else if (!strcmp(name, "endtime"))
+    {
+      retval = PyInt_FromLong(creds->times.endtime);
+    }
+  else if (!strcmp(name, "renew_till"))
+    {
+      retval = PyInt_FromLong(creds->times.renew_till);
+    }
+  else
+    {
+      PyErr_Format(PyExc_AttributeError, "%.50s instance has no attribute '%.400s'",
+		   PyString_AS_STRING(((PyInstanceObject *)self)->in_class->cl_name), name);
+    }
+
+  if (ctxobj)
+    {
+      Py_DECREF(ctxobj);
+    }
+  return retval;
+} /* KrbV.Credentials.__getattr__() */
+
+PyDoc_STRVAR(Credentials__setattr__doc__,
+"__setattr__(string, object) -> NULL, or None.                                  \n\
+                                                                                \n\
+:Summary : Set the value of a member-field in the Credentials object.           \n\
+           Internal function, do not use.                                       \n\
+                                                                                \n\
+:Parameters :                                                                   \n\
+    __setattr__() supports only the following Credentials members:              \n\
+    * authtime  :  int                                                          \n\
+    This method _doesn't_ support setting the following members:                \n\
+    * client  : Principal                                                       \n\
+    * server  : Principal                                                       \n\
+                                                                                \n\
+:Return Value :                                                                 \n\
+    NULL means you tried to set a disallowed member's value.                    \n\
+    None means you successfully set some other member's value.                  \n\
+");
+static PyObject*
+Credentials__setattr(PyObject *unself __UNUSED, PyObject *args)
+{
+  char *name;
+  PyObject *self, *value, *nameo, *tmp, *err;
+  PyInstanceObject *inst;
+  krb5_context ctx = NULL;
+  krb5_creds *creds = NULL;
+
+  if(!PyArg_ParseTuple(args, "OO!O:__setattr__", &self, &PyString_Type, &nameo, &value))
+    return NULL;
+  inst = (PyInstanceObject *)self;
+
+  name = PyString_AsString(nameo);
+
+  if (strcmp(name, "context") && strcmp(name, "_creds"))
+    {
+      tmp = PyObject_GetAttrString(self, "context");
+      if (tmp)
+	{
+          ctx = Context_get_krb5_context(tmp);
+          Py_DECREF(tmp);
+	}
+      creds = Credentials_get_krb5_creds(self);
+    }
+
+  PyErr_Clear();
+
+  if ((!strcmp(name, "context") && ctx)
+      || (!strcmp(name, "_creds") && creds)
+      || !strcmp(name, "client")
+      || !strcmp(name, "server")
+      )
+    {
+      PyErr_Format(PyExc_AttributeError, "You cannot set attribute '%.400s'", name);
+      return NULL;
+    }
+  else if (!strcmp(name, "authtime") ||
+	   !strcmp(name, "starttime") ||
+	   !strcmp(name, "endtime") ||
+	   !strcmp(name, "renew_till")
+	   )
+    {
+      long credtime = PyInt_AsLong(value);
+      if ((err = PyErr_Occurred()))
+	return NULL;
+      if (!strcmp(name, "authtime"))
+	creds->times.authtime = credtime;
+      else if (!strcmp(name, "starttime"))
+	creds->times.starttime = credtime;
+      else if (!strcmp(name, "endtime"))
+	creds->times.endtime = credtime;
+      else if (!strcmp(name, "renew_till"))
+	creds->times.renew_till = credtime;
+    }
+  else
+    PyDict_SetItem(inst->in_dict, nameo, value);
+
+  Py_INCREF(Py_None);
+  return Py_None;
+} /* KrbV.Credentials.__setattr__() */
+
+static PyMethodDef credentials_methods[] = {
+  {"__init__",         (PyCFunction)Credentials__init__, METH_VARARGS|METH_KEYWORDS, Credentials__init__doc__},
+  {NULL, NULL, 0, NULL}
+};
+
+static PyObject *
+pk_creds_make_class(PyObject *module)
+{
+  static PyMethodDef
+    getattr = {"__getattr__", Credentials__getattr, METH_VARARGS, Credentials__getattr__doc__},
+    setattr = {"__setattr__", Credentials__setattr, METH_VARARGS, Credentials__setattr__doc__};
+
+  return make_class(module, "Credentials", credentials_methods, &getattr, &setattr);
 }
 
 /************************* replay cache **********************************/
@@ -3768,6 +4592,10 @@ initkrbV(void)
   ccache_class = pk_ccache_make_class(modname);
   PyDict_SetItemString(dict, "CCache", ccache_class);
   Py_DECREF(ccache_class);
+
+  creds_class = pk_creds_make_class(modname);
+  PyDict_SetItemString(dict, "Credentials", creds_class);
+  Py_DECREF(creds_class);
 
   rcache_class = pk_rcache_make_class(modname);
   PyDict_SetItemString(dict, "RCache", rcache_class);
