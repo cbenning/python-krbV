@@ -32,8 +32,10 @@ static void destroy_ac(void *cobj, void *desc);
 static void destroy_principal(void *cobj, void *desc);
 static void destroy_creds(void *cobj, void *desc);
 static PyObject *make_credentials(PyObject *context, krb5_context ctx, krb5_creds *creds);
+static PyObject *CCacheIter_next(PyObject *unself, PyObject *args);
 
-static PyObject *krb5_module, *context_class, *auth_context_class, *principal_class, *ccache_class, *creds_class, *rcache_class, *keytab_class;
+static PyObject *krb5_module, *context_class, *auth_context_class, *principal_class,
+  *ccache_class, *ccacheiter_class, *creds_class, *rcache_class, *keytab_class;
 
 /* Helper methods for getting at wrapped data */
 static krb5_context
@@ -3305,18 +3307,24 @@ CCache_get_creds(PyObject *unself __UNUSED, PyObject *args, PyObject *kw)
   return retval;
 } /* KrbV.CCache.get_creds() */
 
-static krb5_cc_cursor
-CCache_get_krb5_cc_cursor(PyObject *self)
+static PyObject*
+make_ccache_iter(PyObject *ccache, char *type)
 {
-  PyObject *tmp;
-  tmp = PyObject_GetAttrString(self, "_cursor");
-  if (tmp)
-    {
-      krb5_cc_cursor cursor = PyCObject_AsVoidPtr(tmp);
-      Py_DECREF(tmp);
-      return cursor;
-    }
-  return NULL;
+  PyObject *context, *itertype, *objargs, *objkw, *iter;
+
+  context = PyObject_GetAttrString(ccache, "context");
+  itertype = PyString_FromString(type);
+  objargs = PyTuple_New(0);
+  objkw = PyDict_New();
+  PyDict_SetItemString(objkw, "context", context);
+  PyDict_SetItemString(objkw, "ccache", ccache);
+  PyDict_SetItemString(objkw, "type", itertype);
+  iter = PyEval_CallObjectWithKeywords(ccacheiter_class, objargs, objkw);
+  Py_DECREF(objkw);
+  Py_DECREF(objargs);
+  Py_DECREF(itertype);
+  Py_DECREF(context);
+  return iter;
 }
 
 PyDoc_STRVAR(CCache__iter__doc__,
@@ -3344,100 +3352,11 @@ PyDoc_STRVAR(CCache__iter__doc__,
 static PyObject*
 CCache__iter__(PyObject *unself __UNUSED, PyObject *args)
 {
-  PyObject *self, *context, *curobj;
-  krb5_context ctx;
-  krb5_ccache ccache;
-  krb5_cc_cursor cursor;
-  krb5_error_code rc;
+  PyObject *self, *iter;
   if (!PyArg_ParseTuple(args, "O:__iter__", &self))
     return NULL;
-  context = PyObject_GetAttrString(self, "context");
-  ctx = Context_get_krb5_context(context);
-  ccache = CCache_get_krb5_ccache(self);
-  cursor = CCache_get_krb5_cc_cursor(self);
-  if (cursor) {
-    // Re-starting iteration after it was interrupted partway through.
-    // Cleanup from the previous iteration before starting over.
-    rc = krb5_cc_end_seq_get(ctx, ccache, &cursor);
-    if (rc)
-      return pk_error(rc);
-  }
-  rc = krb5_cc_start_seq_get(ctx, ccache, &cursor);
-  if (rc)
-    return pk_error(rc);
-  curobj = PyCObject_FromVoidPtr(cursor, NULL);
-  PyObject_SetAttrString(self, "_cursor", curobj);
-  Py_DECREF(curobj);
-
-  Py_DECREF(context);
-  Py_INCREF(self);
-  return self;
-}
-
-PyDoc_STRVAR(CCache_next__doc__,
-"next() -> Credentials object                                                \n\
-                                                                             \n\
-:Summary : Return the next Credentials object in the CCache.                 \n\
-           Internal function, used to implement the iterator protocol.       \n\
-           Do not call directly.                                             \n\
-                                                                             \n\
-:Parameters : none                                                           \n\
-                                                                             \n\
-:Return Value :                                                              \n\
-    The next Credentials object stored in the CCache.                        \n\
-                                                                             \n\
-:Purpose :                                                                   \n\
-    Implement the iterator protocol.                                         \n\
-                                                                             \n\
-:Action & side-effects :                                                     \n\
-    Returns the next Credentials object while iterating over the contents    \n\
-    of the CCache.                                                           \n\
-                                                                             \n\
-:See also :                                                                  \n\
-    __iter__() - get an iterator over the contents of the CCache.            \n\
-");
-static PyObject*
-CCache_next(PyObject *unself __UNUSED, PyObject *args)
-{
-  PyObject *self, *context, *retval;
-  krb5_context ctx;
-  krb5_ccache ccache;
-  krb5_cc_cursor cursor;
-  krb5_creds creds;
-  krb5_error_code rc;
-  char *name;
-
-  if (!PyArg_ParseTuple(args, "O:next", &self))
-    return NULL;
-  context = PyObject_GetAttrString(self, "context");
-  ctx = Context_get_krb5_context(context);
-  ccache = CCache_get_krb5_ccache(self);
-  cursor = CCache_get_krb5_cc_cursor(self);
-  if (!cursor)
-    {
-      PyErr_Format(PyExc_RuntimeError, "cannot call next() outside of iteration");
-      return NULL;
-    }
-  rc = krb5_cc_next_cred(ctx, ccache, &cursor, &creds);
-  if (rc)
-    {
-      if (rc == KRB5_CC_END)
-	{
-	  PyErr_Format(PyExc_StopIteration, "no more Credentials");
-	  return NULL;
-	}
-      else
-	return pk_error(rc);
-    }
-
-  rc = krb5_unparse_name(ctx, creds.server, &name);
-  if (rc)
-    return pk_error(rc);
-  retval = PyString_FromString(name);
-  free(name);
-
-  Py_DECREF(context);
-  return retval;
+  iter = make_ccache_iter(self, "keys");
+  return iter;
 }
 
 PyDoc_STRVAR(CCache__getitem__doc__,
@@ -3569,8 +3488,66 @@ CCache_get(PyObject *unself, PyObject *args)
   PyErr_Clear();
   if (creds)
     return creds;
-  else
-    Py_RETURN_NONE;
+  Py_RETURN_NONE;
+}
+
+static PyObject*
+iter_to_list(PyObject *iter)
+{
+  if (!iter)
+    return NULL;
+  PyObject *list, *objargs, *elem, *err;
+  objargs = PyTuple_Pack(1, iter);
+  list = PyList_New(0);
+  while ((elem = CCacheIter_next(NULL, objargs)))
+    {
+      if (PyList_Append(list, elem))
+	return NULL;
+      Py_DECREF(elem);
+    }
+  Py_DECREF(objargs);
+  if ((err = PyErr_Occurred()))
+    {
+      if (err == PyExc_StopIteration)
+	{
+	  PyErr_Clear();
+	}
+      else
+	return NULL;
+    }
+  return list;
+}
+
+PyDoc_STRVAR(CCache_iterkeys__doc__,
+"iterkeys() -> iterator                                                      \n\
+                                                                             \n\
+:Summary : Return an iterator over the server principal names                \n\
+           stored in the CCache.                                             \n\
+                                                                             \n\
+:Parameters : none                                                           \n\
+                                                                             \n\
+:Return Value :                                                              \n\
+    Iterator returning strings.                                              \n\
+                                                                             \n\
+:Purpose :                                                                   \n\
+    Support iteration over the contents of the CCache.                       \n\
+                                                                             \n\
+:Action & side-effects :                                                     \n\
+    Returns a CCacheIter object.  Each CCacheIter maintains its own state,   \n\
+    so multiple iterators may be used concurrently.                          \n\
+                                                                             \n\
+:See also :                                                                  \n\
+    itervalues() - get an iterator over Credential objects stored in         \n\
+                   the CCache                                                \n\
+");
+static PyObject*
+CCache_iterkeys(PyObject *unself __UNUSED, PyObject *args)
+{
+  PyObject *self, *iter;
+  if (!PyArg_ParseTuple(args, "O:iterkeys", &self))
+    return NULL;
+  iter = make_ccache_iter(self, "keys");
+  return iter;
 }
 
 PyDoc_STRVAR(CCache_keys__doc__,
@@ -3594,45 +3571,46 @@ PyDoc_STRVAR(CCache_keys__doc__,
 static PyObject*
 CCache_keys(PyObject *unself __UNUSED, PyObject *args)
 {
-  PyObject *self, *context, *nameobj, *retval;
-  krb5_context ctx;
-  krb5_ccache ccache;
-  krb5_cc_cursor cursor;
-  krb5_creds creds;
-  krb5_error_code rc;
-  char *name;
+  PyObject *self, *iter, *retval;
 
   if (!PyArg_ParseTuple(args, "O:keys", &self))
     return NULL;
-  context = PyObject_GetAttrString(self, "context");
-  ctx = Context_get_krb5_context(context);
-  ccache = CCache_get_krb5_ccache(self);
-
-  rc = krb5_cc_start_seq_get(ctx, ccache, &cursor);
-  if (rc)
-    return pk_error(rc);
-
-  retval = PyList_New(0);
-  while (!(rc = krb5_cc_next_cred(ctx, ccache, &cursor, &creds)))
-    {
-      rc = krb5_unparse_name(ctx, creds.server, &name);
-      if (rc)
-	return pk_error(rc);
-      nameobj = PyString_FromString(name);
-      free(name);
-      if (PyList_Append(retval, nameobj))
-	return NULL;
-      Py_DECREF(nameobj);
-    }
-  if (rc != KRB5_CC_END)
-    return pk_error(rc);
-
-  rc = krb5_cc_end_seq_get(ctx, ccache, &cursor);
-  if (rc)
-    return pk_error(rc);
-
-  Py_DECREF(context);
+  iter = make_ccache_iter(self, "keys");
+  retval = iter_to_list(iter);
+  Py_XDECREF(iter);
   return retval;
+}
+
+PyDoc_STRVAR(CCache_itervalues__doc__,
+"itervalues() -> iterator over Credentials objects stored in the CCache      \n\
+                                                                             \n\
+:Summary : Return an iterator over the Credentials objects                   \n\
+           stored in the CCache.                                             \n\
+                                                                             \n\
+:Parameters : none                                                           \n\
+                                                                             \n\
+:Return Value :                                                              \n\
+    Iterator returning Credentials objects.                                  \n\
+                                                                             \n\
+:Purpose :                                                                   \n\
+    Support iteration over the contents of the CCache.                       \n\
+                                                                             \n\
+:Action & side-effects :                                                     \n\
+    Returns a CCacheIter object.  Each CCacheIter maintains its own state,   \n\
+    so multiple iterators may be used concurrently.                          \n\
+                                                                             \n\
+:See also :                                                                  \n\
+    iteritems() - get an iterator over the (name, Credential) tuples         \n\
+                  stored in the CCache                                       \n\
+");
+static PyObject*
+CCache_itervalues(PyObject *unself __UNUSED, PyObject *args)
+{
+  PyObject *self, *iter;
+  if (!PyArg_ParseTuple(args, "O:itervalues", &self))
+    return NULL;
+  iter = make_ccache_iter(self, "values");
+  return iter;
 }
 
 PyDoc_STRVAR(CCache_values__doc__,
@@ -3654,40 +3632,49 @@ PyDoc_STRVAR(CCache_values__doc__,
 static PyObject*
 CCache_values(PyObject *unself __UNUSED, PyObject *args)
 {
-  PyObject *self, *context, *credsobj, *retval;
-  krb5_context ctx;
-  krb5_ccache ccache;
-  krb5_cc_cursor cursor;
-  krb5_creds creds;
-  krb5_error_code rc;
+  PyObject *self, *iter, *retval;
 
   if (!PyArg_ParseTuple(args, "O:values", &self))
     return NULL;
-  context = PyObject_GetAttrString(self, "context");
-  ctx = Context_get_krb5_context(context);
-  ccache = CCache_get_krb5_ccache(self);
-
-  rc = krb5_cc_start_seq_get(ctx, ccache, &cursor);
-  if (rc)
-    return pk_error(rc);
-
-  retval = PyList_New(0);
-  while (!(rc = krb5_cc_next_cred(ctx, ccache, &cursor, &creds)))
-    {
-      credsobj = make_credentials(context, ctx, &creds);
-      if (PyList_Append(retval, credsobj))
-	return NULL;
-      Py_DECREF(credsobj);
-    }
-  if (rc != KRB5_CC_END)
-    return pk_error(rc);
-
-  rc = krb5_cc_end_seq_get(ctx, ccache, &cursor);
-  if (rc)
-    return pk_error(rc);
-
-  Py_DECREF(context);
+  iter = make_ccache_iter(self, "values");
+  retval = iter_to_list(iter);
+  Py_XDECREF(iter);
   return retval;
+}
+
+PyDoc_STRVAR(CCache_iteritems__doc__,
+"iteritems() -> iterator over (name, Credentials) tuples                     \n\
+                stored in the CCache                                         \n\
+                                                                             \n\
+:Summary : Return an iterator over the (name, Credentials) tuples            \n\
+           stored in the CCache.                                             \n\
+                                                                             \n\
+:Parameters : none                                                           \n\
+                                                                             \n\
+:Return Value :                                                              \n\
+    Iterator returning (name, Credentials) tuples.                           \n\
+                                                                             \n\
+:Purpose :                                                                   \n\
+    Support iteration over the contents of the CCache.                       \n\
+                                                                             \n\
+:Action & side-effects :                                                     \n\
+    Returns a CCacheIter object.  Each CCacheIter maintains its own state,   \n\
+    so multiple iterators may be used concurrently.                          \n\
+                                                                             \n\
+:See also :                                                                  \n\
+    iterkeys() - get an iterator over server principal names stored in       \n\
+                 the CCache                                                  \n\
+    iteritems() - get an iterator over the (name, Credential) tuples         \n\
+                  stored in the CCache                                       \n\
+");
+static PyObject*
+CCache_iteritems(PyObject *unself __UNUSED, PyObject *args)
+{
+  PyObject *self, *iter;
+  if (!PyArg_ParseTuple(args, "O:iteritems", &self))
+    return NULL;
+  iter = make_ccache_iter(self, "items");
+  return iter;
 }
 
 PyDoc_STRVAR(CCache_items__doc__,
@@ -3701,7 +3688,7 @@ PyDoc_STRVAR(CCache_items__doc__,
     a list of (name, Credentials) tuples                                     \n\
                                                                              \n\
 :Purpose :                                                                   \n\
-    Implement the mapping  protocol.                                         \n\
+    Implement the mapping protocol.                                         \n\
                                                                              \n\
 :See also :                                                                  \n\
     keys() - return a list of names of server principals in the CCache       \n\
@@ -3710,48 +3697,13 @@ PyDoc_STRVAR(CCache_items__doc__,
 static PyObject*
 CCache_items(PyObject *unself __UNUSED, PyObject *args)
 {
-  PyObject *self, *context, *retval, *tuple, *nameobj, *credsobj;
-  krb5_context ctx;
-  krb5_ccache ccache;
-  krb5_cc_cursor cursor;
-  krb5_creds creds;
-  krb5_error_code rc;
-  char *name;
+  PyObject *self, *iter, *retval;
 
   if (!PyArg_ParseTuple(args, "O:items", &self))
     return NULL;
-  context = PyObject_GetAttrString(self, "context");
-  ctx = Context_get_krb5_context(context);
-  ccache = CCache_get_krb5_ccache(self);
-
-  rc = krb5_cc_start_seq_get(ctx, ccache, &cursor);
-  if (rc)
-    return pk_error(rc);
-
-  retval = PyList_New(0);
-  while (!(rc = krb5_cc_next_cred(ctx, ccache, &cursor, &creds)))
-    {
-      rc = krb5_unparse_name(ctx, creds.server, &name);
-      if (rc)
-	return pk_error(rc);
-      nameobj = PyString_FromString(name);
-      free(name);
-      credsobj = make_credentials(context, ctx, &creds);
-      tuple = PyTuple_Pack(2, nameobj, credsobj);
-      Py_DECREF(credsobj);
-      Py_DECREF(nameobj);
-      if (PyList_Append(retval, tuple))
-	return NULL;
-      Py_DECREF(tuple);
-    }
-  if (rc != KRB5_CC_END)
-    return pk_error(rc);
-
-  rc = krb5_cc_end_seq_get(ctx, ccache, &cursor);
-  if (rc)
-    return pk_error(rc);
-
-  Py_DECREF(context);
+  iter = make_ccache_iter(self, "items");
+  retval = iter_to_list(iter);
+  Py_XDECREF(iter);
   return retval;
 }
 
@@ -3764,11 +3716,13 @@ static PyMethodDef ccache_methods[] = {
   {"init_creds_keytab",(PyCFunction)CCache_init_creds_keytab,METH_VARARGS|METH_KEYWORDS, CCache_init_creds_keytab__doc__},
   {"init",             (PyCFunction)CCache_initialize,       METH_VARARGS|METH_KEYWORDS, CCache_initialize__doc__},
   {"__iter__",         (PyCFunction)CCache__iter__,          METH_VARARGS,               CCache__iter__doc__},
-  {"next",             (PyCFunction)CCache_next,             METH_VARARGS,               CCache_next__doc__},
   {"__getitem__",      (PyCFunction)CCache__getitem__,       METH_VARARGS,               CCache__getitem__doc__},
   {"keys",             (PyCFunction)CCache_keys,             METH_VARARGS,               CCache_keys__doc__},
   {"values",           (PyCFunction)CCache_values,           METH_VARARGS,               CCache_values__doc__},
   {"items",            (PyCFunction)CCache_items,            METH_VARARGS,               CCache_items__doc__},
+  {"iterkeys",         (PyCFunction)CCache_iterkeys,         METH_VARARGS,               CCache_iterkeys__doc__},
+  {"itervalues",       (PyCFunction)CCache_itervalues,       METH_VARARGS,               CCache_itervalues__doc__},
+  {"iteritems",        (PyCFunction)CCache_iteritems,        METH_VARARGS,               CCache_iteritems__doc__},
   {"has_key",          (PyCFunction)CCache_has_key,          METH_VARARGS,               CCache_has_key__doc__},
   {"get",              (PyCFunction)CCache_get,              METH_VARARGS,               CCache_get__doc__},
   {NULL, NULL, 0, NULL}
@@ -3782,6 +3736,292 @@ pk_ccache_make_class(PyObject *module)
     setattr = {"__setattr__", CCache_setattr, METH_VARARGS, CCache_setattr__doc__};
 
   return make_class(module, "CCache", ccache_methods, &getattr, &setattr);
+}
+
+static krb5_cc_cursor
+CCacheIter_get_krb5_cc_cursor(PyObject *self)
+{
+  PyObject *tmp;
+  tmp = PyObject_GetAttrString(self, "_cursor");
+  if (!tmp)
+    return NULL;
+  krb5_cc_cursor cursor = PyCObject_AsVoidPtr(tmp);
+  Py_DECREF(tmp);
+  return cursor;
+}
+
+PyDoc_STRVAR(CCacheIter__init__doc__,
+" __init__() -> CCacheIter                                                   \n\
+                                                                             \n\
+:Summary : Create a new CCacheIter object.                                   \n\
+                                                                             \n\
+:Parameters :                                                                \n\
+    context            : Context                                             \n\
+    ccache             : CCache                                              \n\
+    type               : string                                              \n\
+                                                                             \n\
+:Return Value :                                                              \n\
+    CCacheIter object                                                        \n\
+                                                                             \n\
+:Other Methods :                                                             \n\
+    next() - get the next Credentials object in the CCache.                  \n\
+");
+static PyObject*
+CCacheIter__init__(PyObject *unself __UNUSED, PyObject *args, PyObject *kw)
+{
+  PyObject *self;
+  PyObject *context, *ccacheobj, *curobj, *itertype;
+  krb5_context ctx;
+  krb5_ccache ccache;
+  krb5_cc_cursor cursor;
+  krb5_error_code rc;
+  static const char *kwlist[] = {"self", "context", "ccache", "type", NULL};
+
+  if (!PyArg_ParseTupleAndKeywords(args, kw, "OOOO!|:__init__", (char **)kwlist,
+				   &self, &context, &ccacheobj,
+				   &PyString_Type, &itertype))
+    return NULL;
+
+  ctx = Context_get_krb5_context(context);
+  if (!ctx)
+    {
+      PyErr_Format(PyExc_TypeError, "a Context object is required");
+      return NULL;
+    }
+  ccache = CCache_get_krb5_ccache(ccacheobj);
+  if (!ccache)
+    {
+      PyErr_Format(PyExc_TypeError, "a CCache object is required");
+      return NULL;
+    }
+
+  rc = krb5_cc_start_seq_get(ctx, ccache, &cursor);
+  if (rc)
+    return pk_error(rc);
+  curobj = PyCObject_FromVoidPtr(cursor, NULL);
+  PyObject_SetAttrString(self, "_cursor", curobj);
+  Py_DECREF(curobj);
+
+  PyObject_SetAttrString(self, "context", context);
+  PyObject_SetAttrString(self, "ccache", ccacheobj);
+  PyObject_SetAttrString(self, "type", itertype);
+
+  Py_RETURN_NONE;
+} /* KrbV.CCacheIter.__init__() */
+
+PyDoc_STRVAR(CCacheIter_next__doc__,
+"next() -> Credentials object                                                \n\
+                                                                             \n\
+:Summary : Return the next Credentials object in the CCache.                 \n\
+           Internal function, used to implement the iterator protocol.       \n\
+           Do not call directly.                                             \n\
+                                                                             \n\
+:Parameters : none                                                           \n\
+                                                                             \n\
+:Return Value :                                                              \n\
+    The next Credentials object stored in the CCache.                        \n\
+                                                                             \n\
+:Purpose :                                                                   \n\
+    Implement the iterator protocol.                                         \n\
+                                                                             \n\
+:Action & side-effects :                                                     \n\
+    Returns the next Credentials object while iterating over the contents    \n\
+    of the CCache.                                                           \n\
+                                                                             \n\
+:See also :                                                                  \n\
+    __iter__() - get an iterator over the contents of the CCache.            \n\
+");
+static PyObject*
+CCacheIter_next(PyObject *unself __UNUSED, PyObject *args)
+{
+  PyObject *self, *context, *ccacheobj, *itertype, *nameobj, *credsobj, *retval;
+  krb5_context ctx;
+  krb5_ccache ccache;
+  krb5_cc_cursor cursor;
+  krb5_creds creds;
+  krb5_error_code rc;
+  char *type;
+  char *name;
+
+  if (!PyArg_ParseTuple(args, "O:next", &self))
+    return NULL;
+  context = PyObject_GetAttrString(self, "context");
+  ctx = Context_get_krb5_context(context);
+  ccacheobj = PyObject_GetAttrString(self, "ccache");
+  ccache = CCache_get_krb5_ccache(ccacheobj);
+  Py_DECREF(ccacheobj);
+  cursor = CCacheIter_get_krb5_cc_cursor(self);
+  rc = krb5_cc_next_cred(ctx, ccache, &cursor, &creds);
+  if (rc)
+    {
+      if (rc == KRB5_CC_END)
+	{
+	  PyErr_Format(PyExc_StopIteration, "no more Credentials");
+	  return NULL;
+	}
+      else
+	return pk_error(rc);
+    }
+
+  itertype = PyObject_GetAttrString(self, "type");
+  type = PyString_AsString(itertype);
+  Py_DECREF(itertype);
+
+  if (!strcmp(type, "keys"))
+    {
+      rc = krb5_unparse_name(ctx, creds.server, &name);
+      if (rc)
+	return pk_error(rc);
+      retval = PyString_FromString(name);
+      free(name);
+    }
+  else if (!strcmp(type, "values"))
+    {
+      retval = make_credentials(context, ctx, &creds);
+    }
+  else if (!strcmp(type, "items"))
+    {
+      rc = krb5_unparse_name(ctx, creds.server, &name);
+      if (rc)
+	return pk_error(rc);
+      nameobj = PyString_FromString(name);
+      free(name);
+      credsobj = make_credentials(context, ctx, &creds);
+      retval = PyTuple_Pack(2, nameobj, credsobj);
+      Py_DECREF(credsobj);
+      Py_DECREF(nameobj);
+    }
+  else
+    {
+      PyErr_Format(PyExc_ValueError, "invalid iterator type: %s", type);
+      return NULL;
+    }
+
+  Py_DECREF(context);
+  return retval;
+} /* KrbV.CCacheIter.next() */
+
+PyDoc_STRVAR(CCacheIter__iter__doc__,
+"__iter__() -> iterator over Credentials objects in the CCache               \n\
+                                                                             \n\
+:Summary : Return this iterator.                                             \n\
+                                                                             \n\
+:Parameters : none                                                           \n\
+                                                                             \n\
+:Return Value :                                                              \n\
+    The current iterator.                                                    \n\
+                                                                             \n\
+:Purpose :                                                                   \n\
+    Implement the iterator protocol.                                         \n\
+                                                                             \n\
+:Action & side-effects :                                                     \n\
+    Return this iterator.                                                    \n\
+                                                                             \n\
+:See also :                                                                  \n\
+    next() - get the next Credentials object in the CCache.                  \n\
+");
+static PyObject*
+CCacheIter__iter__(PyObject *unself __UNUSED, PyObject *args)
+{
+  PyObject *self;
+  if (!PyArg_ParseTuple(args, "O:__iter__", &self))
+    return NULL;
+  Py_INCREF(self);
+  return self;
+} /* KrbV.CCacheIter.__iter__() */
+
+PyDoc_STRVAR(CCacheIter__getattr__doc__,
+"__getattr__() -> get attributes of a CCacheIter object                      \n\
+                                                                             \n\
+:Summary : Internal function, do not use.                                    \n\
+");
+static PyObject*
+CCacheIter__getattr__(PyObject *unself __UNUSED, PyObject *args)
+{
+  PyObject *self;
+  PyInstanceObject *inst;
+  char *name;
+  if (!PyArg_ParseTuple(args, "Os:__getattr__", &self, &name))
+    return NULL;
+  inst = (PyInstanceObject *) self;
+  PyErr_Format(PyExc_AttributeError, "%.50s instance has no attribute '%.400s'",
+	       PyString_AsString(inst->in_class->cl_name), name);
+  return NULL;
+} /* KrbV.CCacheIter.__getattr__() */
+
+PyDoc_STRVAR(CCacheIter__setattr__doc__,
+"__setattr__() -> set attributes of a CCacheIter object                      \n\
+                                                                             \n\
+:Summary : Internal function, do not use.                                    \n\
+");
+static PyObject*
+CCacheIter__setattr__(PyObject *unself __UNUSED, PyObject *args)
+{
+  PyObject *self, *nameobj, *value;
+  PyInstanceObject *inst;
+  char *name;
+  if (!PyArg_ParseTuple(args, "OO!O:__setattr__", &self, &PyString_Type, &nameobj, &value))
+    return NULL;
+
+  name = PyString_AsString(nameobj);
+  if ((!strcmp(name, "context") && PyObject_HasAttrString(self, "context")) ||
+      (!strcmp(name, "ccache")  && PyObject_HasAttrString(self, "ccache")) ||
+      (!strcmp(name, "_cursor") && PyObject_HasAttrString(self, "_cursor")) ||
+      (!strcmp(name, "type")    && PyObject_HasAttrString(self, "type")))
+    {
+      PyErr_Format(PyExc_AttributeError, "You cannot set attribute '%.400s'", name);
+      return NULL;
+    }
+
+  inst = (PyInstanceObject *) self;
+  PyDict_SetItem(inst->in_dict, nameobj, value);
+
+  Py_RETURN_NONE;
+} /* KrbV.CCacheIter.__setattr__() */
+
+PyDoc_STRVAR(CCacheIter__del__doc__,
+"__del__() -> clean up the CCacheIter                                        \n\
+                                                                             \n\
+:Summary : Internal function, do not use.                                    \n\
+");
+static PyObject*
+CCacheIter__del__(PyObject *unself __UNUSED, PyObject *args)
+{
+  PyObject *self, *context, *ccacheobj;
+  krb5_context ctx;
+  krb5_ccache ccache;
+  krb5_cc_cursor cursor;
+  krb5_error_code rc;
+  if (!PyArg_ParseTuple(args, "O:__del__", &self))
+    return NULL;
+  context = PyObject_GetAttrString(self, "context");
+  ctx = Context_get_krb5_context(context);
+  Py_DECREF(context);
+  ccacheobj = PyObject_GetAttrString(self, "ccache");
+  ccache = CCache_get_krb5_ccache(ccacheobj);
+  Py_DECREF(ccacheobj);
+  cursor = CCacheIter_get_krb5_cc_cursor(self);
+  rc = krb5_cc_end_seq_get(ctx, ccache, &cursor);
+
+  Py_RETURN_NONE;
+} /* KrbV.CCacheIter.__del__() */
+
+static PyMethodDef ccacheiter_methods[] = {
+  {"__init__",         (PyCFunction)CCacheIter__init__,      METH_VARARGS|METH_KEYWORDS, CCacheIter__init__doc__},
+  {"next",             (PyCFunction)CCacheIter_next,         METH_VARARGS,               CCacheIter_next__doc__},
+  {"__iter__",         (PyCFunction)CCacheIter__iter__,      METH_VARARGS,               CCacheIter__iter__doc__},
+  {"__del__",          (PyCFunction)CCacheIter__del__,       METH_VARARGS,               CCacheIter__del__doc__},
+  {NULL, NULL, 0, NULL}
+};
+
+static PyObject *
+pk_ccacheiter_make_class(PyObject *module)
+{
+  static PyMethodDef
+    getattr = {"__getattr__", CCacheIter__getattr__, METH_VARARGS, CCacheIter__getattr__doc__},
+    setattr = {"__setattr__", CCacheIter__setattr__, METH_VARARGS, CCacheIter__setattr__doc__};
+
+  return make_class(module, "CCacheIter", ccacheiter_methods, &getattr, &setattr);
 }
 
 /************************* credentials **********************************/
@@ -4592,6 +4832,10 @@ initkrbV(void)
   ccache_class = pk_ccache_make_class(modname);
   PyDict_SetItemString(dict, "CCache", ccache_class);
   Py_DECREF(ccache_class);
+
+  ccacheiter_class = pk_ccacheiter_make_class(modname);
+  PyDict_SetItemString(dict, "CCacheIter", ccacheiter_class);
+  Py_DECREF(ccacheiter_class);
 
   creds_class = pk_creds_make_class(modname);
   PyDict_SetItemString(dict, "Credentials", creds_class);
