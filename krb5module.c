@@ -3241,6 +3241,11 @@ PyDoc_STRVAR(CCache_get_creds__doc__,
                                                                              \n\
 :Parameters :                                                                \n\
     in_creds : Credentials object                                            \n\
+    principal: the Principal object of the service for which to get a ticket \n\
+    service  : the name of the service for which to get a ticket             \n\
+    One of in_creds, principal, or service must be provided.  If more than   \n\
+    one is provided, in_creds will take precedence, followed by principal,   \n\
+    followed by service.                                                     \n\
     options  : integer                                                       \n\
        0x00000001 KRB5_GC_USER_USER    Get a peer-to-peer ticket             \n\
        0x00000002 KRB5_GC_CACHED       Don't request a new ticket            \n\
@@ -3269,27 +3274,71 @@ CCache_get_creds(PyObject *unself __UNUSED, PyObject *args, PyObject *kw)
 {
   krb5_context ctx = NULL;
   krb5_ccache ccache = NULL;
-  PyObject *retval, *self, *credsobj, *context;
+  PyObject *retval, *self, *context, *credsobj = NULL, *sprincobj = NULL,
+    *cprincobj = NULL, *tmpargs;
+  char *service_name = NULL;
   krb5_flags options = 0;
   krb5_error_code rc;
-  krb5_creds *in_creds, *out_creds;
+  krb5_creds *in_creds = NULL, *out_creds, tmp_creds;
 
-  static const char *kwlist[]={"self", "in_creds", "options", NULL };
+  static const char *kwlist[]={"self", "in_creds", "principal", "service", "options", NULL };
 
-  if (!PyArg_ParseTupleAndKeywords(args, kw, "OO|i:get_credentials", (char **)kwlist,
-				   &self, &credsobj, &options))
+  if (!PyArg_ParseTupleAndKeywords(args, kw, "O|OOsi:get_creds", (char **)kwlist,
+				   &self, &credsobj, &sprincobj, &service_name, &options))
     return NULL;
-
-  in_creds = Credentials_get_krb5_creds(credsobj);
-  if (!in_creds)
-    {
-      PyErr_Format(PyExc_TypeError, "a Credentials object is required");
-      return NULL;
-    }
 
   context = PyObject_GetAttrString(self, "context");
   ctx = Context_get_krb5_context(context);
   ccache = CCache_get_krb5_ccache(self);
+
+  if (credsobj)
+    {
+      in_creds = Credentials_get_krb5_creds(credsobj);
+      if (!in_creds)
+	{
+	  PyErr_Format(PyExc_TypeError, "a Credentials object is required");
+	  return NULL;
+	}
+    }
+  if (!in_creds)
+    {
+      memset(&tmp_creds, 0, sizeof(tmp_creds));
+      if (sprincobj)
+	{
+	  tmp_creds.server = Principal_get_krb5_principal(sprincobj);
+	  if (!tmp_creds.server)
+	    {
+	      PyErr_Format(PyExc_TypeError, "a Principal object is required");
+	      return NULL;
+	    }
+	}
+      else if (service_name)
+	{
+	  rc = krb5_parse_name(ctx, service_name, &tmp_creds.server);
+	  if (rc)
+	    return pk_error(rc);
+	}
+      else
+	{
+	  PyErr_Format(PyExc_ValueError, "one of in_creds, principal, or service must be provided");
+	  return NULL;
+	}
+      tmpargs = PyTuple_Pack(1, self);
+      cprincobj = CCache_principal(NULL, tmpargs, NULL);
+      Py_DECREF(tmpargs);
+      if (!cprincobj)
+	{
+	  PyErr_Format(PyExc_ValueError, "could not get retrieve primary Principal from CCache");
+	  return NULL;
+	}
+      tmp_creds.client = Principal_get_krb5_principal(cprincobj);
+      if (!tmp_creds.client)
+	{
+	  PyErr_Format(PyExc_ValueError, "invalid primary Principal in CCache");
+	  return NULL;
+	}
+      in_creds = &tmp_creds;
+    }
 
   rc = krb5_get_credentials(ctx, options, ccache, in_creds, &out_creds);
   if (rc)
@@ -3297,6 +3346,7 @@ CCache_get_creds(PyObject *unself __UNUSED, PyObject *args, PyObject *kw)
 
   retval = make_credentials(context, ctx, out_creds);
 
+  Py_XDECREF(cprincobj);
   Py_DECREF(context);
   return retval;
 } /* KrbV.CCache.get_creds() */
