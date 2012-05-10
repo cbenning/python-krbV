@@ -4314,6 +4314,9 @@ Credentials__setattr(PyObject *unself __UNUSED, PyObject *args)
       || (!strcmp(name, "_creds") && creds)
       || !strcmp(name, "client")
       || !strcmp(name, "server")
+      || !strcmp(name, "addresses")
+      || !strcmp(name, "keyblock")
+      || !strcmp(name, "authdata")
       )
     {
       PyErr_Format(PyExc_AttributeError, "You cannot set attribute '%.400s'", name);
