@@ -1668,6 +1668,7 @@ PyDoc_STRVAR(AuthContext_getattr__doc__,
 	       KRB5_AUTH_CONTEXT_RET_TIME	Save timestamps to output structure       \n\
 	       KRB5_AUTH_CONTEXT_DO_SEQUENCE	Use sequence numbers                      \n\
 	       KRB5_AUTH_CONTEXT_RET_SEQUENCE	Copy sequence numbers to output structure \n\
+    * rcache : RCache object                                                    \n\
     * key    : tuple containing the keyblock contents                           \n\
                                                                                 \n\
 :Return value :                                                                 \n\
@@ -1703,6 +1704,23 @@ AuthContext_getattr(PyObject *unself __UNUSED, PyObject *args)
     if (rc)
       return pk_error(rc);
     retval = PyInt_FromLong(flags);
+  } else if (!strcmp(name, "rcache")) {
+    krb5_rcache rcache;
+    PyObject *cobj, *context, *objargs, *objkw;
+    rc = krb5_auth_con_getrcache(ctx, ac, &rcache);
+    if (rc)
+      return pk_error(rc);
+    cobj = PyCObject_FromVoidPtr(rcache, NULL);
+    context = PyObject_GetAttrString(self, "context");
+    objargs = PyTuple_New(0);
+    objkw = PyDict_New();
+    PyDict_SetItemString(objkw, "context", context);
+    PyDict_SetItemString(objkw, "rc", cobj);
+    retval = PyInstance_New(rcache_class, objargs, objkw);
+    Py_DECREF(objkw);
+    Py_DECREF(objargs);
+    Py_DECREF(context);
+    Py_DECREF(cobj);
   } else if (!strcmp(name, "addrs")) {
     krb5_address **addrs = calloc(3, sizeof(krb5_address *));
     rc = krb5_auth_con_getaddrs(ctx, ac, &addrs[0], &addrs[1]);
@@ -1821,6 +1839,11 @@ AuthContext_setattr(PyObject *unself __UNUSED, PyObject *args)
       krb5_rcache rcache;
 
       rcache = RCache_get_krb5_rcache(value);
+      if (!rcache)
+	{
+	  PyErr_Format(PyExc_TypeError, "a RCache object is required");
+	  return NULL;
+	}
       rc = krb5_auth_con_setrcache(ctx, ac, rcache);
       if(rc)
 	return pk_error(rc);
