@@ -4235,6 +4235,10 @@ Credentials__getattr(PyObject *unself __UNUSED, PyObject *args)
     {
       retval = make_keyblock(&creds->keyblock);
     }
+  else if (!strcmp(name, "authdata"))
+    {
+      retval = make_authdata_list(creds->authdata);
+    }
   else if (!strcmp(name, "authtime"))
     {
       retval = PyInt_FromLong(creds->times.authtime);
