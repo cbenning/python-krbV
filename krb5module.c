@@ -428,32 +428,18 @@ PyDoc_STRVAR(Context_rc_default__doc__,
 static PyObject*
 Context_rc_default(PyObject *unself __UNUSED, PyObject *args, PyObject *kw)
 {
-  PyObject *retval, *self;
+  PyObject *self, *objargs, *objkw, *retval;
 
   if(!PyArg_ParseTuple(args, "O:default_rcache", &self))
     return NULL;
 
-  retval = PyObject_GetAttrString(self, "_default_rc");
-  if(retval)
-    return retval;
-
-  PyErr_Clear();
-
-  {
-    PyObject *subargs, *mykw = NULL;
-
-    subargs = Py_BuildValue("()");
-    if(!kw)
-      {
-	mykw = kw = PyDict_New();
-      }
-    PyDict_SetItemString(kw, "context", self); /* Just pass existing keywords straight along */
-    retval = PyEval_CallObjectWithKeywords(rcache_class, subargs, kw);
-    Py_DECREF(subargs);
-    Py_XDECREF(mykw);
-    if(retval)
-      PyObject_SetAttrString(self, "_default_rc", retval);
-  }
+  objargs = PyTuple_New(0);
+  objkw = PyDict_New();
+  PyDict_SetItemString(objkw, "context", self);
+  retval = PyInstance_New(rcache_class, objargs, objkw);
+  assert(retval);
+  Py_DECREF(objargs);
+  Py_XDECREF(objkw);
 
   return retval;
 } /* KrbV.Context.default_rcache() */
