@@ -4227,6 +4227,10 @@ Credentials__getattr(PyObject *unself __UNUSED, PyObject *args)
     {
       retval = make_principal(ctxobj, ctx, creds->server);
     }
+  else if (!strcmp(name, "addresses"))
+    {
+      retval = make_address_list(creds->addresses, 1);
+    }
   else if (!strcmp(name, "authtime"))
     {
       retval = PyInt_FromLong(creds->times.authtime);
@@ -4249,10 +4253,7 @@ Credentials__getattr(PyObject *unself __UNUSED, PyObject *args)
 		   PyString_AS_STRING(((PyInstanceObject *)self)->in_class->cl_name), name);
     }
 
-  if (ctxobj)
-    {
-      Py_DECREF(ctxobj);
-    }
+  Py_XDECREF(ctxobj);
   return retval;
 } /* KrbV.Credentials.__getattr__() */
 
