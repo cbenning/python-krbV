@@ -100,7 +100,7 @@ def tcp_client(opts, conn):
                       ccache=ccache, data='authtest')
     print 'Successfully authenticated via tcp to service: %s' % sprinc.name
     ac.flags = krbV.KRB5_AUTH_CONTEXT_DO_SEQUENCE|krbV.KRB5_AUTH_CONTEXT_DO_TIME
-    ac.rcache = ctx.default_rcache()
+    ac.rcache = krbV.RCache(name=sprinc[0], context=ctx)
     ac.genaddrs(conn,
                 krbV.KRB5_AUTH_CONTEXT_GENERATE_LOCAL_FULL_ADDR|
                 krbV.KRB5_AUTH_CONTEXT_GENERATE_REMOTE_FULL_ADDR)
@@ -130,7 +130,7 @@ def udp_client(opts, sock, addr):
     sprinc = krbV.Principal(name=opts.principal, context=ctx)
     ac = krbV.AuthContext(context=ctx)
     ac.flags = krbV.KRB5_AUTH_CONTEXT_DO_SEQUENCE|krbV.KRB5_AUTH_CONTEXT_DO_TIME
-    ac.rcache = ctx.default_rcache()
+    ac.rcache = krbV.RCache(name=sprinc[0], context=ctx)
     ac, req = ctx.mk_req(server=sprinc, client=cprinc,
                          auth_context=ac, ccache=ccache,
                          options=krbV.AP_OPTS_MUTUAL_REQUIRED)
