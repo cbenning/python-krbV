@@ -4410,52 +4410,55 @@ static PyObject*
 RCache_init(PyObject *unself __UNUSED, PyObject *args, PyObject *kw)
 {
   PyObject *self;
-  PyObject *cobj, *conobj = NULL, *new_rc_name = NULL;
+  PyObject *cobj, *conobj = NULL, *rcobj = NULL, *new_rc_name = NULL;
   krb5_context ctx;
   krb5_rcache rcache;
   krb5_error_code rc;
   krb5_data rcname;
+  static const char *kwlist[] = {"self", "context", "name", "rc", NULL};
 
-  if(!PyArg_ParseTuple(args, "O:__init__", &self))
+  if (!PyArg_ParseTupleAndKeywords(args, kw, "O|OO!O!:__init__", (char **)kwlist,
+				   &self, &conobj,
+				   &PyString_Type, &new_rc_name,
+				   &PyCObject_Type, &rcobj))
     return NULL;
 
-  if(kw && PyDict_Check(kw))
-    {
-      conobj = PyDict_GetItemString(kw, "context");
-      new_rc_name = PyDict_GetItemString(kw, "name");
-    }
-  if(!conobj)
+  if (conobj)
+    Py_INCREF(conobj);
+  else
     conobj = pk_default_context(NULL, NULL);
   assert(conobj);
   ctx = Context_get_krb5_context(conobj);
 
-  if(new_rc_name)
+  if (rcobj)
     {
-      rcname.data = PyString_AsString(new_rc_name);
-      rcname.length = PyString_Size(new_rc_name);
+      cobj = rcobj;
+      Py_INCREF(cobj);
     }
   else
     {
-      rcname.data = "default";
-      rcname.length = 7;
-    }
-  
-  rc = krb5_get_server_rcache(ctx, &rcname, &rcache);
-
-  if(rc)
-    {
-      pk_error(rc);
-      return NULL;
-    }
-  else
-    {
+      if (new_rc_name)
+	{
+	  rcname.data = PyString_AsString(new_rc_name);
+	  rcname.length = PyString_Size(new_rc_name);
+	}
+      else
+	{
+	  rcname.data = "default";
+	  rcname.length = 7;
+	}
+      rc = krb5_get_server_rcache(ctx, &rcname, &rcache);
+      if (rc)
+	return pk_error(rc);
       cobj = PyCObject_FromVoidPtr(rcache, NULL);
-      PyObject_SetAttrString(self, "_rcache", cobj);
-      PyObject_SetAttrString(self, "context", conobj);
     }
 
-  Py_INCREF(Py_None);
-  return Py_None;
+  PyObject_SetAttrString(self, "_rcache", cobj);
+  Py_DECREF(cobj);
+  PyObject_SetAttrString(self, "context", conobj);
+  Py_DECREF(conobj);
+
+  Py_RETURN_NONE;
 } /* KrbV.RCache.__init__() */
 
 PyDoc_STRVAR(RCache_eq__doc__,
