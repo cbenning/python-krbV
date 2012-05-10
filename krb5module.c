@@ -389,7 +389,7 @@ Context_cc_default(PyObject *unself __UNUSED, PyObject *args, PyObject *kw)
     if(!kw)
       mykw = kw = PyDict_New();
     PyDict_SetItemString(kw, "context", self); /* Just pass existing keywords straight along */
-    retval = PyEval_CallObjectWithKeywords(ccache_class, subargs, kw);
+    retval = PyInstance_New(ccache_class, subargs, kw);
     Py_DECREF(subargs);
     Py_XDECREF(mykw);
     if(retval)
@@ -496,7 +496,7 @@ Context_kt_default(PyObject *unself __UNUSED, PyObject *args, PyObject *kw)
 	mykw = kw = PyDict_New();
       }
     PyDict_SetItemString(kw, "context", self); /* Just pass existing keywords straight along, mostly */
-    retval = PyEval_CallObjectWithKeywords(keytab_class, args, kw);
+    retval = PyInstance_New(keytab_class, args, kw);
     Py_DECREF(args);
     Py_XDECREF(mykw);
     if(retval)
@@ -618,7 +618,7 @@ Context_mk_req(PyObject *unself, PyObject *args, PyObject *kw)
 {
   krb5_context kctx;
   PyObject *retval, *self, *in_data = NULL, *server = NULL, *client = NULL, *ccacheo = NULL, *tmp,
-    *auth_context = NULL, *credso = NULL;
+    *auth_context = NULL, *credso = NULL, *outstr;
   krb5_auth_context ac_out = NULL;
   krb5_data outbuf, inbuf;
   krb5_creds creds, *credsp = NULL, *credsptr = NULL;
@@ -740,32 +740,33 @@ Context_mk_req(PyObject *unself, PyObject *args, PyObject *kw)
   if(rc)
     return pk_error(rc);
 
-  retval = PyTuple_New(2);
-  if(auth_context)
+  if (auth_context)
     {
       Py_INCREF(auth_context);
     }
   else
     {
-      PyObject *subargs, *mykw = NULL, *otmp;
+      PyObject *subargs, *mykw, *otmp;
 
       /* Construct and evaluate an AuthContext.__init__() call,
        * which makes a copy of the AuthContext input parameter,
        * as we've modified it:
        */
-      subargs = Py_BuildValue("()");
+      subargs = PyTuple_New(0);
       mykw = PyDict_New();
       PyDict_SetItemString(mykw, "context", self);
       otmp = PyCObject_FromVoidPtrAndDesc(ac_out, kctx, destroy_ac);
       PyDict_SetItemString(mykw, "ac", otmp);
-      auth_context = PyEval_CallObjectWithKeywords(auth_context_class, subargs, mykw);
+      auth_context = PyInstance_New(auth_context_class, subargs, mykw);
       Py_DECREF(otmp);
       Py_DECREF(subargs);
       Py_XDECREF(mykw);
     }
   /* mk_req()'s retval is a 2-elt tuple:  (AuthContext, string) */
-  PyTuple_SetItem(retval, 0, auth_context);
-  PyTuple_SetItem(retval, 1, PyString_FromStringAndSize(outbuf.data, outbuf.length));
+  outstr = PyString_FromStringAndSize(outbuf.data, outbuf.length);
+  retval = PyTuple_Pack(2, auth_context, outstr);
+  Py_DECREF(outstr);
+  Py_DECREF(auth_context);
   krb5_free_data_contents(kctx, &outbuf);
 
   return retval;
@@ -802,7 +803,7 @@ make_principal(PyObject *ctx_obj, krb5_context ctx, krb5_principal orig_princ)
   subargs = Py_BuildValue("(O)", otmp);
   mykw = PyDict_New();
   PyDict_SetItemString(mykw, "context", ctx_obj);
-  retval = PyEval_CallObjectWithKeywords(principal_class, subargs, mykw);
+  retval = PyInstance_New(principal_class, subargs, mykw);
   Py_DECREF(subargs);
   Py_XDECREF(mykw);
   Py_DECREF(otmp);
@@ -1046,17 +1047,17 @@ Context_rd_req(PyObject *unself, PyObject *args, PyObject *kw)
     }
   else
     {
-      PyObject *subargs, *mykw = NULL, *otmp;
+      PyObject *subargs, *mykw, *otmp;
 
       subargs = Py_BuildValue("()");
       mykw = PyDict_New();
       PyDict_SetItemString(mykw, "context", self);
       otmp = PyCObject_FromVoidPtrAndDesc(ac_out, kctx, destroy_ac);
       PyDict_SetItemString(mykw, "ac", otmp);
-      auth_context = PyEval_CallObjectWithKeywords(auth_context_class, subargs, mykw);
+      auth_context = PyInstance_New(auth_context_class, subargs, mykw);
       Py_DECREF(otmp);
       Py_DECREF(subargs);
-      Py_XDECREF(mykw);
+      Py_DECREF(mykw);
     }
   assert(!check_obj(args));
 
@@ -1107,7 +1108,7 @@ obj_to_fd(PyObject *fd_obj)
   else if(PyLong_Check(fd_obj))
     return PyLong_AsLongLong(fd_obj);
 
-  fd_obj = PyEval_CallMethod(fd_obj, "fileno", "()");
+  fd_obj = PyObject_CallMethod(fd_obj, "fileno", "()");
   if(!fd_obj)
     return -1;
   return PyInt_AsLong(fd_obj);
@@ -1279,20 +1280,20 @@ Context_sendauth(PyObject *unself, PyObject *args, PyObject *kw)
     return pk_error(rc);
 
   {
-    PyObject *subargs, *mykw = NULL, *otmp;
+    PyObject *subargs, *mykw, *otmp;
 
     /* build & run a python call: AuthContext( context=self, ac=ac_out).             */
     /* this makes a copy of sendauth's updated version of the client's auth_context. */
     /* Context.sendauth() returns this updated auth_context.                         */
-    subargs = Py_BuildValue("()");
+    subargs = PyTuple_New(0);
     mykw = PyDict_New();
     PyDict_SetItemString(mykw, "context", self);
     otmp = PyCObject_FromVoidPtrAndDesc(ac_out, kctx, destroy_ac);
     PyDict_SetItemString(mykw, "ac", otmp);
-    retval = PyEval_CallObjectWithKeywords(auth_context_class, subargs, mykw);
+    retval = PyInstance_New(auth_context_class, subargs, mykw);
     Py_DECREF(otmp);
     Py_DECREF(subargs);
-    Py_XDECREF(mykw);
+    Py_DECREF(mykw);
   }
 
   return retval;
@@ -1441,18 +1442,18 @@ Context_recvauth(PyObject *unself, PyObject *args, PyObject *kw)
 
 
   {
-    PyObject *subargs, *mykw = NULL, *otmp, *auth_context;
+    PyObject *subargs, *mykw, *otmp, *auth_context;
 
     subargs = Py_BuildValue("()");
     mykw = PyDict_New();
     PyDict_SetItemString(mykw, "context", self);
     otmp = PyCObject_FromVoidPtrAndDesc(ac_out, kctx, destroy_ac);
     PyDict_SetItemString(mykw, "ac", otmp);
-    auth_context = PyEval_CallObjectWithKeywords(auth_context_class, subargs, mykw);
+    auth_context = PyInstance_New(auth_context_class, subargs, mykw);
     PyTuple_SetItem(retval, 0, auth_context);
     Py_DECREF(otmp);
     Py_DECREF(subargs);
-    Py_XDECREF(mykw);
+    Py_DECREF(mykw);
   }
 
   return retval;
@@ -1962,32 +1963,24 @@ PyDoc_STRVAR(AuthContext_rd_priv__doc__,
 static PyObject *
 AuthContext_rd_priv(PyObject *unself __UNUSED, PyObject *args)
 {
-  PyObject *self, *tmp, *retval;
+  PyObject *self, *context, *retval;
   krb5_data inbuf, outbuf;
-  krb5_auth_context ac = NULL;
+  krb5_auth_context ac;
   krb5_error_code rc;
-  krb5_context ctx = NULL;
+  krb5_context ctx;
   krb5_replay_data rdata = {0, 0, 0};
 
-  if(!PyArg_ParseTuple(args, "Os#", &self, &inbuf.data, &inbuf.length))
+  if (!PyArg_ParseTuple(args, "Os#", &self, &inbuf.data, &inbuf.length))
     return NULL;
 
-  tmp = PyObject_GetAttrString(self, "context");
-  if(tmp)
-    {
-      ctx = Context_get_krb5_context(tmp);
-      if(!ctx)
-	return NULL;
-    }
-  else
-    return NULL;
+  context = PyObject_GetAttrString(self, "context");
+  ctx = Context_get_krb5_context(context);
+  Py_DECREF(context);
   ac = AuthContext_get_krb5_auth_context(self);
-  if(!ac)
-    return NULL;
 
   memset(&outbuf, 0, sizeof(outbuf));
   rc = krb5_rd_priv(ctx, ac, &inbuf, &outbuf, &rdata);
-  if(rc)
+  if (rc)
     return pk_error(rc);
 
   retval = PyString_FromStringAndSize(outbuf.data, outbuf.length);
@@ -2026,32 +2019,24 @@ PyDoc_STRVAR(AuthContext_mk_priv__doc__,
 static PyObject *
 AuthContext_mk_priv(PyObject *unself __UNUSED, PyObject *args)
 {
-  PyObject *self, *tmp, *retval;
+  PyObject *self, *context, *retval;
   krb5_data inbuf, outbuf;
-  krb5_auth_context ac = NULL;
+  krb5_auth_context ac;
   krb5_error_code rc;
-  krb5_context ctx = NULL;
+  krb5_context ctx;
   krb5_replay_data rdata = {0, 0, 0};
 
-  if(!PyArg_ParseTuple(args, "Os#", &self, &inbuf.data, &inbuf.length))
+  if (!PyArg_ParseTuple(args, "Os#", &self, &inbuf.data, &inbuf.length))
     return NULL;
 
-  tmp = PyObject_GetAttrString(self, "context");
-  if(tmp)
-    {
-      ctx = Context_get_krb5_context(tmp);
-      if(!ctx)
-	return NULL;
-    }
-  else
-    return NULL;
+  context = PyObject_GetAttrString(self, "context");
+  ctx = Context_get_krb5_context(context);
   ac = AuthContext_get_krb5_auth_context(self);
-  if(!ac)
-    return NULL;
+  Py_DECREF(context);
 
   memset(&outbuf, 0, sizeof(outbuf));
   rc = krb5_mk_priv(ctx, ac, &inbuf, &outbuf, &rdata);
-  if(rc)
+  if (rc)
     return pk_error(rc);
 
   retval = PyString_FromStringAndSize(outbuf.data, outbuf.length);
@@ -2096,38 +2081,42 @@ AuthContext_init(PyObject *unself __UNUSED, PyObject *args, PyObject *kw)
   PyObject *cobj, *conobj = NULL, *acobj = NULL;
   krb5_context ctx;
   krb5_auth_context ac;
-  krb5_error_code rc = 0;
+  krb5_error_code rc;
   static const char *kwlist[] = { "self", "context", "ac", NULL};
 
   if(!PyArg_ParseTupleAndKeywords(args, kw, "O|OO!:__init__", (char **)kwlist, &self,
 				  &conobj, &PyCObject_Type, &acobj))
     return NULL;
 
-  if(!conobj)
-    conobj = pk_default_context(NULL, NULL);
+  if (conobj)
+    Py_INCREF(conobj);
+  else
+    {
+      conobj = pk_default_context(NULL, NULL);
+    }
   assert(conobj);
   ctx = Context_get_krb5_context(conobj);
 
-  if(!acobj)
-    rc = krb5_auth_con_init(ctx, &ac);
-  if(rc)
-    return pk_error(rc);
+  if (acobj)
+    {
+      cobj = acobj;
+      Py_INCREF(cobj);
+      ac = PyCObject_AsVoidPtr(cobj);
+    }
   else
     {
-      if(acobj)
-	{
-	  cobj = acobj;
-	  Py_INCREF(acobj);
-	}
-      else
-	cobj = PyCObject_FromVoidPtrAndDesc(ac, ctx, destroy_ac);
-      PyObject_SetAttrString(self, "_ac", cobj);
-      Py_DECREF(cobj);
-      PyObject_SetAttrString(self, "context", conobj);
+      rc = krb5_auth_con_init(ctx, &ac);
+      if (rc)
+	return pk_error(rc);
+      cobj = PyCObject_FromVoidPtrAndDesc(ac, ctx, destroy_ac);
     }
 
-  Py_INCREF(Py_None);
-  return Py_None;
+  PyObject_SetAttrString(self, "_ac", cobj);
+  Py_DECREF(cobj);
+  PyObject_SetAttrString(self, "context", conobj);
+  Py_DECREF(conobj);
+
+  Py_RETURN_NONE;
 } /* KrbV.AuthContext.__init__() */
 
 PyDoc_STRVAR(AuthContext_genaddrs__doc__,
@@ -2893,17 +2882,17 @@ PyDoc_STRVAR(CCache_principal__doc__,
 static PyObject*
 CCache_principal(PyObject *unself __UNUSED, PyObject *args, PyObject *kw)
 {
-  krb5_context ctx = NULL;
-  krb5_ccache ccache = NULL;
   PyObject *retval, *self, *conobj;
-  krb5_principal princ = NULL;
+  krb5_context ctx;
+  krb5_ccache ccache;
+  krb5_principal princ;
   krb5_error_code rc;
 
   if(!PyArg_ParseTuple(args, "O:principal", &self))
     return NULL;
 
   retval = PyObject_GetAttrString(self, "_principal");
-  if(retval)
+  if (retval)
     {
       Py_INCREF(retval);
       return retval;
@@ -2911,36 +2900,32 @@ CCache_principal(PyObject *unself __UNUSED, PyObject *args, PyObject *kw)
   PyErr_Clear();
 
   conobj = PyObject_GetAttrString(self, "context");
-  if (conobj)
-    {
-      ctx = Context_get_krb5_context(conobj);
-      Py_DECREF(conobj);
-    }
-
+  ctx = Context_get_krb5_context(conobj);
   ccache = CCache_get_krb5_ccache(self);
 
   {
-    PyObject *subargs, *otmp, *mykw = NULL;
+    PyObject *subargs, *otmp, *mykw;
 
     rc = krb5_cc_get_principal(ctx, ccache, &princ);
-    if(rc)
+    if (rc)
       return pk_error(rc);
 
     otmp = PyCObject_FromVoidPtrAndDesc(princ, ctx, destroy_principal);
-    subargs = Py_BuildValue("(O)", otmp);
-    if(!kw)
-      mykw = kw = PyDict_New();
-    PyDict_SetItemString(kw, "context", conobj); /* Just pass existing keywords straight along */
-    retval = PyEval_CallObjectWithKeywords(principal_class, subargs, kw);
-    Py_DECREF(subargs);
-    Py_XDECREF(mykw);
-    Py_DECREF(otmp);
-    if(retval)
-      PyObject_SetAttrString(self, "_principal", retval);
+    subargs = PyTuple_Pack(1, otmp);
+    if (kw)
+      mykw = PyDict_Copy(kw); /* Just pass existing keywords straight along */
     else
-      return NULL;
+      mykw = PyDict_New();
+    PyDict_SetItemString(mykw, "context", conobj);
+    retval = PyInstance_New(principal_class, subargs, mykw);
+    assert(retval);
+    Py_DECREF(mykw);
+    Py_DECREF(subargs);
+    Py_DECREF(otmp);
+    PyObject_SetAttrString(self, "_principal", retval);
   }
 
+  Py_DECREF(conobj);
   return retval;
 } /* KrbV.CCache.principal() */
 
@@ -3211,7 +3196,7 @@ CCache_get_credentials(PyObject *unself __UNUSED, PyObject *args, PyObject *kw)
 
       krb5_copy_principal(ctx, out_creds->server, &princ);
       subargs = Py_BuildValue("(O)", PyCObject_FromVoidPtrAndDesc(princ, ctx, destroy_principal));
-      server = PyEval_CallObjectWithKeywords(principal_class, subargs, mykw);
+      server = PyInstance_New(principal_class, subargs, mykw);
       Py_XDECREF(mykw);
       Py_XDECREF(subargs);
     }
@@ -3225,7 +3210,7 @@ CCache_get_credentials(PyObject *unself __UNUSED, PyObject *args, PyObject *kw)
 
       krb5_copy_principal(ctx, out_creds->client, &princ);
       subargs = Py_BuildValue("(O)", PyCObject_FromVoidPtrAndDesc(princ, ctx, destroy_principal));
-      client = PyEval_CallObjectWithKeywords(principal_class, subargs, mykw);
+      client = PyInstance_New(principal_class, subargs, mykw);
       Py_XDECREF(mykw);
       Py_XDECREF(subargs);
     }
@@ -3328,7 +3313,7 @@ make_ccache_iter(PyObject *ccache, char *type)
   PyDict_SetItemString(objkw, "context", context);
   PyDict_SetItemString(objkw, "ccache", ccache);
   PyDict_SetItemString(objkw, "type", itertype);
-  iter = PyEval_CallObjectWithKeywords(ccacheiter_class, objargs, objkw);
+  iter = PyInstance_New(ccacheiter_class, objargs, objkw);
   Py_DECREF(objkw);
   Py_DECREF(objargs);
   Py_DECREF(itertype);
@@ -4054,7 +4039,7 @@ make_credentials(PyObject *context, krb5_context ctx, krb5_creds *creds)
   objkw = PyDict_New();
   PyDict_SetItemString(objkw, "creds", credobj);
   PyDict_SetItemString(objkw, "context", context);
-  retval = PyEval_CallObjectWithKeywords(creds_class, objargs, objkw);
+  retval = PyInstance_New(creds_class, objargs, objkw);
   Py_DECREF(objkw);
   Py_DECREF(objargs);
   Py_DECREF(credobj);
@@ -4778,24 +4763,22 @@ pk_keytab_make_class(PyObject *module)
 static PyObject *
 pk_default_context(PyObject *unself __UNUSED, PyObject *unused_args __UNUSED)
 {
-  PyObject *retval = NULL;
+  PyObject *retval;
 
   retval = PyObject_GetAttrString(krb5_module, "_default_context");
-  if(!retval)
+  if (!retval)
     {
-      PyObject *klass, *subargs;
+      PyObject *subargs, *subkw;
 
       PyErr_Clear();
-      klass = PyObject_GetAttrString(krb5_module, "Context");
-      subargs = Py_BuildValue("()");
-      retval = PyEval_CallObject(klass, subargs);
+      subargs = PyTuple_New(0);
+      subkw = PyDict_New();
+      retval = PyInstance_New(context_class, subargs, subkw);
       assert(retval);
+      Py_DECREF(subkw);
       Py_DECREF(subargs);
-      if(retval)
-	PyObject_SetAttrString(krb5_module, "_default_context", retval);
+      PyObject_SetAttrString(krb5_module, "_default_context", retval);
     }
-
-  Py_INCREF(retval);
 
   return retval;
 }
