@@ -27,7 +27,7 @@ sudo cp .libs/krbVmodule.so /usr/local/lib/python2.7/dist-packages/
 ```
 
 How to use:
-```
+```python
 import krbV
 
 ctx = krbV.default_context()
@@ -35,4 +35,5 @@ principal = krbV.Principal(name="myprincipal",context=ctx)
 ccache = krbV.CCache(name=ccache_file, context=ctx, primary_principal=principal)
 ccache.init(principal)
 ccache.init_creds_password(principal=principal,password="mypassword")
+```
 
