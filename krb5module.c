@@ -2929,6 +2929,77 @@ CCache_principal(PyObject *unself __UNUSED, PyObject *args, PyObject *kw)
   return retval;
 } /* KrbV.CCache.principal() */
 
+PyDoc_STRVAR(CCache_init_creds_password__doc__,
+"init_creds_keytab(password, principal) -> NULL, None, or krb error code       \n\
+                                                                             \n\
+:Summary : Get a server's initial credentials, using a keytab.               \n\
+                                                                             \n\
+:Parameters :                                                                \n\
+    password\n\
+    principal                                                                \n\
+                                                                             \n\
+:Return value :                                                              \n\
+    None means everything worked.                                            \n\
+    NULL means the principal name was invalid.                               \n\
+    nonzero integer means the TGT-request failed somehow.                    \n\
+                                                                             \n\
+:See also :                                                                  \n\
+    get_credentials() - for application-clients that need to request & use  \n\
+    tickets.                                                                 \n\
+");
+static PyObject*
+CCache_init_creds_password(PyObject *unself __UNUSED, PyObject *args, PyObject *kw)
+{
+  static const char *kwlist[] = {"self", "password", "principal", NULL};
+  PyObject *self, *principal = NULL, *conobj;
+  krb5_ccache ccache = NULL;
+  krb5_context ctx = NULL;
+  char* password = NULL;
+  krb5_principal princ = NULL;
+  krb5_error_code rc;
+  krb5_creds my_creds;
+  krb5_get_init_creds_opt options;
+
+  if(!PyArg_ParseTupleAndKeywords(args, kw, "OO|O:init_creds_password", (char **)kwlist,
+				  &self, &password, &principal))
+    return NULL;
+
+  conobj = PyObject_GetAttrString(self, "context");
+  if (conobj)
+    {
+      ctx = Context_get_krb5_context(conobj);
+      Py_DECREF(ctx);
+    }
+  ccache = CCache_get_krb5_ccache(self);
+  if(principal == Py_None)
+    principal = NULL;
+  if(!principal)
+    {
+      PyObject *tmp;
+      tmp = Py_BuildValue("(O)", self);
+      principal = CCache_principal(NULL, tmp, NULL);
+      Py_DECREF(tmp);
+    }
+  princ = Principal_get_krb5_principal(principal);
+  if(!princ)
+    return NULL;
+  memset(&my_creds, 0, sizeof(my_creds));
+
+  krb5_get_init_creds_opt_init(&options);
+  rc = krb5_get_init_creds_password(ctx, &my_creds, princ, password, NULL, NULL, 0, NULL, &options);
+  if(rc)
+    return pk_error(rc);
+
+  rc = krb5_cc_store_cred(ctx, ccache, &my_creds);
+  if(rc)
+    return pk_error(rc);
+
+  krb5_free_cred_contents(ctx, &my_creds);
+
+  Py_INCREF(Py_None);
+  return Py_None;
+} /* KrbV.CCache.init_creds_password() */
+
 PyDoc_STRVAR(CCache_init_creds_keytab__doc__,
 "init_creds_keytab(keytab, principal) -> NULL, None, or krb error code       \n\
                                                                              \n\
@@ -3758,6 +3829,7 @@ static PyMethodDef ccache_methods[] = {
   {"get_credentials",  (PyCFunction)CCache_get_credentials,  METH_VARARGS|METH_KEYWORDS, CCache_get_credentials__doc__},
   {"get_creds",        (PyCFunction)CCache_get_creds,        METH_VARARGS|METH_KEYWORDS, CCache_get_creds__doc__},
   {"init_creds_keytab",(PyCFunction)CCache_init_creds_keytab,METH_VARARGS|METH_KEYWORDS, CCache_init_creds_keytab__doc__},
+  {"init_creds_password",(PyCFunction)CCache_init_creds_password,METH_VARARGS|METH_KEYWORDS, CCache_init_creds_password__doc__},
   {"init",             (PyCFunction)CCache_initialize,       METH_VARARGS|METH_KEYWORDS, CCache_initialize__doc__},
   {"__iter__",         (PyCFunction)CCache__iter__,          METH_VARARGS,               CCache__iter__doc__},
   {"__getitem__",      (PyCFunction)CCache__getitem__,       METH_VARARGS,               CCache__getitem__doc__},
